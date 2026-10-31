@@ -1,0 +1,10 @@
+{
+  "channelMap": {
+    "SOURCE_CHANNEL_ID_1": "DESTINATION_CHANNEL_ID_1",
+    "SOURCE_CHANNEL_ID_2": "DESTINATION_CHANNEL_ID_2"
+  },
+  "copyHistory": true,
+  "copyAttachments": true,
+  "copyLinks": true,
+  "maxAttachmentSizeMB": 8
+}

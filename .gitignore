@@ -3,3 +3,4 @@ node_modules/
 transfer.sqlite
 transfer.sqlite-shm
 transfer.sqlite-wal
+config.json
