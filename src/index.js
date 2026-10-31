@@ -162,7 +162,8 @@ async function copyMessage(message, destinationId) {
     // Mark the copied content so it cannot be mistaken for
     // an original message from the source author.
     const attribution =
-      `**${message.author.username} (copied)**\n`;
+      `**${message.author.username} (copied)**\n` +
+      `*Original date: ${message.createdAt.toISOString()}*\n\n`;
 
     content = truncate(
       attribution + content,
