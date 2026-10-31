@@ -182,7 +182,7 @@ async function copyMessage(message, destinationId) {
     );
 
     console.log(
-      `Copied ${message.id} -> ${sent.id}` +
+      `Copied ${message.id} -> ${sent.id} | ` +
       `Original time: ${message.createdAt.toLocaleString()}`
     );
   } catch (error) {
