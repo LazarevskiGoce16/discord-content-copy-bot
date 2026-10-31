@@ -242,32 +242,34 @@ async function syncHistory(sourceId, destinationId) {
 
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
+  console.log("Starting one-time migration...");
 
-  if (config.copyHistory) {
+  try {
     for (const [sourceId, destinationId] of
       Object.entries(config.channelMap)) {
-      try {
-        await syncHistory(sourceId, destinationId);
-      } catch (error) {
-        console.error(
-          `History sync failed for ${sourceId}:`,
-          error
-        );
-      }
+      console.log(`Migrating channel ${sourceId}`);
+
+      await syncHistory(sourceId, destinationId);
     }
+
+    console.log("Migration completed successfully.");
+    console.log("The bot will now shut down.");
+
+    db.close();
+    client.destroy();
+    process.exitCode = 0;
+  } catch (error) {
+    console.error("Migration failed:", error);
+    console.error(
+      "Fix the problem and rerun to retry the migration."
+    );
+
+    db.close();
+    client.destroy();
+    process.exitCode = 1;
   }
-
-  console.log("Historical import finished.");
-  console.log("Listening for new messages...");
 });
 
-client.on(Events.MessageCreate, async (message) => {
-  const destinationId = config.channelMap[message.channelId];
-
-  if (!destinationId) return;
-
-  await copyMessage(message, destinationId);
-});
 
 client.on(Events.Error, (error) => {
   console.error("Discord client error:", error);
