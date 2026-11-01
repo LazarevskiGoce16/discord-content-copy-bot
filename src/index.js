@@ -45,7 +45,7 @@ const saveCopied = db.prepare(`
 
 const inProgress = new Set();
 const maxAttachmentBytes =
-  (config.maxAttachmentSizeMB ?? 8) * 1024 * 1024;
+  (config.maxAttachmentSizeMB ?? 10) * 1024 * 1024;
 
 function truncate(text, maxLength = 2000) {
   if (text.length <= maxLength) return text;
