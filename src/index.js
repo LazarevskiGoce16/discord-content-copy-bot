@@ -5,10 +5,33 @@ const {
   GatewayIntentBits,
   Events,
   PermissionsBitField,
+  Partials
 } = require("discord.js");
 
 const Database = require("better-sqlite3");
 const config = require("../config.json");
+
+const validModes = ["migration", "synchronization"];
+
+if (!validModes.includes(config.mode)) {
+  throw new Error(
+    `Invalid mode "${config.mode}". Use "migration" or "synchronization".`
+  );
+}
+
+if (!config.channelMap || Object.keys(config.channelMap).length === 0) {
+  throw new Error("channelMap must contain at least one channel mapping.");
+}
+
+if (
+  config.mode === "synchronization" &&
+  config.history?.enabled === false &&
+  config.liveSync?.enabled !== true
+) {
+  throw new Error(
+    "Synchronization mode requires history or live synchronization to be enabled."
+  );
+}
 
 if (!process.env.DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is missing from .env");
@@ -20,27 +43,51 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+  ]
 });
 
 const db = new Database("transfer.sqlite");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS copied_messages (
-    source_message_id TEXT PRIMARY KEY,
+    source_message_id TEXT NOT NULL,
     source_channel_id TEXT NOT NULL,
+    destination_channel_id TEXT NOT NULL,
     destination_message_id TEXT NOT NULL,
-    copied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    copied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_message_id, destination_channel_id)
   )
 `);
 
-const isCopied = db.prepare(
-  "SELECT 1 FROM copied_messages WHERE source_message_id = ?"
-);
+const isCopied = db.prepare(`
+  SELECT 1 FROM copied_messages
+  WHERE source_message_id = ?
+    AND destination_channel_id = ?
+`);
 
 const saveCopied = db.prepare(`
-  INSERT OR IGNORE INTO copied_messages
-    (source_message_id, source_channel_id, destination_message_id)
-  VALUES (?, ?, ?)
+  INSERT OR IGNORE INTO copied_messages (
+    source_message_id,
+    source_channel_id,
+    destination_channel_id,
+    destination_message_id
+  )
+  VALUES (?, ?, ?, ?)
+`);
+
+const getCopies = db.prepare(`
+  SELECT destination_channel_id, destination_message_id
+  FROM copied_messages
+  WHERE source_message_id = ?
+`);
+
+const deleteCopied = db.prepare(`
+  DELETE FROM copied_messages
+  WHERE source_message_id = ?
+    AND destination_channel_id = ?
 `);
 
 const inProgress = new Set();
@@ -88,16 +135,99 @@ function shouldCopyMessage(message) {
   return hasLink || hasEligibleAttachment;
 }
 
+async function buildMessagePayload(message) {
+  let content = message.content || "";
+
+  // Include URLs from embeds.
+  if (config.copyLinks !== false) {
+    const embeddedLinks = message.embeds
+      .map((embed) => embed.url)
+      .filter((url) => url && !content.includes(url));
+
+    if (embeddedLinks.length) {
+      content += (content ? "\n" : "") + embeddedLinks.join("\n");
+    }
+  }
+
+  const files = [];
+  const fallbackLinks = [];
+
+  if (config.copyAttachments !== false) {
+    for (const attachment of message.attachments.values()) {
+      if (attachment.size > maxAttachmentBytes) {
+        fallbackLinks.push(attachment.url);
+        continue;
+      }
+
+      try {
+        const response = await fetch(attachment.url);
+
+        if (!response.ok) {
+          throw new Error(`Download returned ${response.status}`);
+        }
+
+        const buffer = Buffer.from(await response.arrayBuffer());
+
+        if (buffer.length > maxAttachmentBytes) {
+          fallbackLinks.push(attachment.url);
+          continue;
+        }
+
+        files.push({
+          attachment: buffer,
+          name: attachment.name || "attachment",
+        });
+      } catch (error) {
+        console.warn(
+          "Could not download attachment:",
+          attachment.url,
+          error.message
+        );
+
+        fallbackLinks.push(attachment.url);
+      }
+    }
+  } else {
+    fallbackLinks.push(
+      ...message.attachments.map((attachment) => attachment.url)
+    );
+  }
+
+  if (fallbackLinks.length) {
+    content += (content ? "\n" : "")
+      + "Original attachment links:\n"
+      + fallbackLinks.join("\n");
+  }
+
+  if (!content.trim() && files.length === 0) {
+    return null;
+  }
+
+  const attribution =
+    `**${message.author.username} (copied)**\n` +
+    `*Original date: ${message.createdAt.toISOString()}*\n\n`;
+
+  content = truncate(attribution + content, 2000);
+
+  return {
+    content,
+    files,
+    allowedMentions: { parse: [] },
+  };
+}
+
 async function copyMessage(message, destinationId) {
   if (!message || message.author?.bot) return;
   if (!shouldCopyMessage(message)) return;
   if (message.author?.id === client.user.id) return;
 
-  if (isCopied.get(message.id) || inProgress.has(message.id)) {
+  const copyKey = `${message.id}:${destinationId}`;
+
+  if (isCopied.get(message.id, destinationId) || inProgress.has(copyKey)) {
     return;
   }
 
-  inProgress.add(message.id);
+  inProgress.add(copyKey);
 
   try {
     const destination = await client.channels.fetch(destinationId);
@@ -124,98 +254,16 @@ async function copyMessage(message, destinationId) {
       return;
     }
 
-    let content = "";
+    const payload = await buildMessagePayload(message);
 
-    // Keep links and text, with clear attribution to the source.
-    if (message.content) {
-      content = message.content;
-    }
+    if (!payload) return;
 
-    if (config.copyLinks) {
-      const embeddedLinks = message.embeds
-        .map((embed) => embed.url)
-        .filter((url) => url && !content.includes(url));
-
-      if (embeddedLinks.length) {
-        content += (content ? "\n" : "")
-          + embeddedLinks.join("\n");
-      }
-    }
-
-    const files = [];
-    const fallbackLinks = [];
-
-    if (config.copyAttachments) {
-      for (const attachment of message.attachments.values()) {
-        if (attachment.size > maxAttachmentBytes) {
-          fallbackLinks.push(attachment.url);
-          continue;
-        }
-
-        try {
-          const response = await fetch(attachment.url);
-
-          if (!response.ok) {
-            throw new Error(`Download returned ${response.status}`);
-          }
-
-          const buffer = Buffer.from(
-            await response.arrayBuffer()
-          );
-
-          // Check actual size too, not only Discord's metadata.
-          if (buffer.length > maxAttachmentBytes) {
-            fallbackLinks.push(attachment.url);
-            continue;
-          }
-
-          files.push({
-            attachment: buffer,
-            name: attachment.name || "attachment",
-          });
-        } catch (error) {
-          console.warn(
-            "Could not download attachment:",
-            attachment.url,
-            error.message
-          );
-          fallbackLinks.push(attachment.url);
-        }
-      }
-    } else {
-      fallbackLinks.push(
-        ...message.attachments.map((attachment) => attachment.url)
-      );
-    }
-
-    if (fallbackLinks.length) {
-      content += (content ? "\n" : "")
-        + "Original attachment links:\n"
-        + fallbackLinks.join("\n");
-    }
-
-    if (!content.trim() && files.length === 0) return;
-
-    // Mark the copied content so it cannot be mistaken for
-    // an original message from the source author.
-    const attribution =
-      `**${message.author.username} (copied)**\n` +
-      `*Original date: ${message.createdAt.toISOString()}*\n\n`;
-
-    content = truncate(
-      attribution + content,
-      2000
-    );
-
-    const sent = await destination.send({
-      content: content || undefined,
-      files,
-      allowedMentions: { parse: [] },
-    });
+    const sent = await destination.send(payload);
 
     saveCopied.run(
       message.id,
       message.channelId,
+      destinationId,
       sent.id
     );
 
@@ -229,7 +277,126 @@ async function copyMessage(message, destinationId) {
       error
     );
   } finally {
-    inProgress.delete(message.id);
+    inProgress.delete(copyKey);
+  }
+}
+
+async function updateCopiedMessage(message) {
+  if (!message) return;
+
+  // Fetch the complete message if Discord only supplied a partial.
+  if (message.partial) {
+    try {
+      message = await message.fetch();
+    } catch (error) {
+      console.error("Could not fetch updated message:", error);
+      return;
+    }
+  }
+
+  if (!message.author || message.author.bot) return;
+  if (message.author.id === client.user.id) return;
+
+  const copies = getCopies.all(message.id);
+
+  if (copies.length === 0) return;
+
+  const copyKey = `${message.id}:update`;
+
+  if (inProgress.has(copyKey)) return;
+
+  inProgress.add(copyKey);
+
+  try {
+    const stillEligible = shouldCopyMessage(message);
+
+    // If the edit makes the message ineligible,
+    // remove its existing destination copies.
+    if (!stillEligible) {
+      for (const copy of copies) {
+        try {
+          const destination = await client.channels.fetch(
+            copy.destination_channel_id
+          );
+
+          if (destination?.isTextBased()) {
+            const destinationMessage = await destination.messages.fetch(
+              copy.destination_message_id
+            );
+
+            await destinationMessage.delete();
+          }
+
+          deleteCopied.run(
+            message.id,
+            copy.destination_channel_id
+          );
+
+          console.log(
+            `Removed copy ${copy.destination_message_id} ` +
+            `because source message ${message.id} is no longer eligible.`
+          );
+        } catch (error) {
+          if (error.code === 10008) {
+            // The destination message was already deleted.
+            deleteCopied.run(
+              message.id,
+              copy.destination_channel_id
+            );
+          } else {
+            console.error(
+              `Could not remove copy ${copy.destination_message_id}:`,
+              error
+            );
+          }
+        }
+      }
+
+      return;
+    }
+
+    const payload = await buildMessagePayload(message);
+
+    if (!payload) return;
+
+    // Update every destination copy independently.
+    for (const copy of copies) {
+      try {
+        const destination = await client.channels.fetch(
+          copy.destination_channel_id
+        );
+
+        if (!destination?.isTextBased()) {
+          console.error(
+            "Invalid destination channel:",
+            copy.destination_channel_id
+          );
+          continue;
+        }
+
+        const destinationMessage = await destination.messages.fetch(
+          copy.destination_message_id
+        );
+
+        await destinationMessage.edit({
+          content: payload.content,
+          files: payload.files,
+          attachments: [],
+          allowedMentions: { parse: [] },
+        });
+
+        console.log(
+          `Updated ${message.id} -> ${copy.destination_message_id}`
+        );
+      } catch (error) {
+        console.error(
+          `Could not update destination copy ${copy.destination_message_id}:`,
+          error
+        );
+      }
+    }
+  } finally {
+    inProgress.delete(copyKey);
   }
 }
 
@@ -281,18 +448,40 @@ async function syncHistory(sourceId, destinationId) {
 
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
-  console.log("Starting one-time migration...");
+  console.log(`Selected mode: ${config.mode}`);
 
   try {
-    for (const [sourceId, destinationId] of
-      Object.entries(config.channelMap)) {
-      console.log(`Migrating channel ${sourceId}`);
+    // Step 1: Copy historical messages if enabled.
+    if (config.history?.enabled !== false) {
+      console.log("Starting historical migration...");
 
-      await syncHistory(sourceId, destinationId);
+      for (const [sourceId, destinationId] of
+        Object.entries(config.channelMap)) {
+        console.log(
+          `Migrating ${sourceId} -> ${destinationId}`
+        );
+
+        await syncHistory(sourceId, destinationId);
+      }
+
+      console.log("Historical migration completed.");
+    } else {
+      console.log("Historical migration is disabled.");
     }
 
-    console.log("Migration completed successfully.");
-    console.log("The bot will now shut down.");
+    // Step 2: Decide whether the bot should remain online.
+    const liveSyncEnabled =
+      config.mode === "synchronization" &&
+      config.liveSync?.enabled === true;
+
+    if (liveSyncEnabled) {
+      console.log("Live synchronization is enabled.");
+      console.log("The bot will remain online.");
+      return;
+    }
+
+    console.log("No live synchronization requested.");
+    console.log("Shutting down the bot.");
 
     db.close();
     client.destroy();
@@ -300,7 +489,7 @@ client.once(Events.ClientReady, async (readyClient) => {
   } catch (error) {
     console.error("Migration failed:", error);
     console.error(
-      "Fix the problem and rerun to retry the migration."
+      "Fix the problem and restart the bot to retry."
     );
 
     db.close();
@@ -309,6 +498,34 @@ client.once(Events.ClientReady, async (readyClient) => {
   }
 });
 
+client.on(Events.MessageCreate, async (message) => {
+  if (
+    config.mode !== "synchronization" ||
+    config.liveSync?.enabled !== true
+  ) {
+    return;
+  }
+
+  const destinationId = config.channelMap[message.channelId];
+
+  if (!destinationId) return;
+
+  await copyMessage(message, destinationId);
+});
+
+client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
+  if (
+    config.mode !== "synchronization" ||
+    config.liveSync?.enabled !== true ||
+    config.liveSync?.syncEdits !== true
+  ) {
+    return;
+  }
+
+  if (!config.channelMap[newMessage.channelId]) return;
+
+  await updateCopiedMessage(newMessage);
+});
 
 client.on(Events.Error, (error) => {
   console.error("Discord client error:", error);
