@@ -52,8 +52,45 @@ function truncate(text, maxLength = 2000) {
   return text.slice(0, maxLength - 3) + "...";
 }
 
+function shouldCopyMessage(message) {
+  const filters = config.filters || {};
+
+  const hasLink =
+    filters.links !== false &&
+    config.copyLinks !== false &&
+    /https?:\/\/\S+/i.test(message.content);
+
+  const hasEligibleAttachment = [
+    ...message.attachments.values()
+  ].some((attachment) => {
+    if (config.copyAttachments === false) return false;
+
+    const type = attachment.contentType || "";
+    const filename = attachment.name || "";
+
+    const isImage =
+      type.startsWith("image/") ||
+      /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(filename);
+
+    const isVideo =
+      type.startsWith("video/") ||
+      /\.(mp4|mov|webm|mkv|avi)$/i.test(filename);
+
+    const isOtherFile = !isImage && !isVideo;
+
+    return (
+      (isImage && filters.images !== false) ||
+      (isVideo && filters.videos !== false) ||
+      (isOtherFile && filters.otherFiles !== false)
+    );
+  });
+
+  return hasLink || hasEligibleAttachment;
+}
+
 async function copyMessage(message, destinationId) {
   if (!message || message.author?.bot) return;
+  if (!shouldCopyMessage(message)) return;
   if (message.author?.id === client.user.id) return;
 
   if (isCopied.get(message.id) || inProgress.has(message.id)) {
