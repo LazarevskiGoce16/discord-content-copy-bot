@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const {
   Client,
+  DiscordAPIError,
   GatewayIntentBits,
   Events,
   PermissionsBitField,
@@ -61,9 +62,11 @@ db.exec(`
     PRIMARY KEY (source_message_id, destination_channel_id)
   );
   CREATE TABLE IF NOT EXISTS sync_checkpoints (
-    source_channel_id TEXT PRIMARY KEY,
+    source_channel_id TEXT NOT NULL,
+    destination_channel_id TEXT NOT NULL,
     last_message_id TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_channel_id, destination_channel_id)
   );
 `);
 
@@ -99,22 +102,26 @@ const getCheckpoint = db.prepare(`
   SELECT last_message_id
   FROM sync_checkpoints
   WHERE source_channel_id = ?
+    AND destination_channel_id = ?
 `);
 
 const saveCheckpoint = db.prepare(`
   INSERT INTO sync_checkpoints (
     source_channel_id,
+    destination_channel_id,
     last_message_id,
     updated_at
   )
-  VALUES (?, ?, CURRENT_TIMESTAMP)
-  ON CONFLICT(source_channel_id)
+  VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(source_channel_id, destination_channel_id)
   DO UPDATE SET
     last_message_id = excluded.last_message_id,
     updated_at = CURRENT_TIMESTAMP
 `);
 
 const inProgress = new Set();
+// In-flight copies, so concurrent callers can await the same result.
+const pendingCopies = new Map();
 const maxAttachmentBytes =
   (config.maxAttachmentSizeMB ?? 10) * 1024 * 1024;
 
@@ -240,19 +247,39 @@ async function buildMessagePayload(message) {
   };
 }
 
+// Discord rejects these requests no matter how often they are retried
+// (e.g. 400 invalid form body, 413 request entity too large).
+function isPermanentSendError(error) {
+  return error instanceof DiscordAPIError
+    && (error.status === 400 || error.status === 413);
+}
+
+// Returns true when the message is copied or intentionally skipped,
+// and false when it should be retried later.
 async function copyMessage(message, destinationId) {
-  if (!message || message.author.bot || !shouldCopyMessage(message)) {
+  if (!message || message.author?.bot || !shouldCopyMessage(message)) {
     return true;
   }
-  if (message.author?.id === client.user.id) return true;
-
-  const copyKey = `${message.id}:${destinationId}`;
 
   if (isCopied.get(message.id, destinationId)) return true;
 
-  if (inProgress.has(copyKey)) return true;
-  inProgress.add(copyKey);
+  const copyKey = `${message.id}:${destinationId}`;
 
+  // Another caller (live sync or history sync) is already copying this
+  // message; report its outcome instead of assuming success.
+  if (pendingCopies.has(copyKey)) return pendingCopies.get(copyKey);
+
+  const copy = sendCopy(message, destinationId);
+  pendingCopies.set(copyKey, copy);
+
+  try {
+    return await copy;
+  } finally {
+    pendingCopies.delete(copyKey);
+  }
+}
+
+async function sendCopy(message, destinationId) {
   try {
     const destination = await client.channels.fetch(destinationId);
 
@@ -298,13 +325,19 @@ async function copyMessage(message, destinationId) {
 
     return true;
   } catch (error) {
+    if (isPermanentSendError(error)) {
+      console.error(
+        `Skipping message ${message.id}; Discord rejected it permanently:`,
+        error.message
+      );
+      return true;
+    }
+
     console.error(
       `Failed to copy message ${message.id}:`,
       error
     );
     return false;
-  } finally {
-    inProgress.delete(copyKey);
   }
 }
 
@@ -497,10 +530,10 @@ async function syncHistory(sourceId, destinationId) {
 
   if (!source || !source.isTextBased() || !source.messages) {
     console.error(`Invalid source channel: ${sourceId}`);
-    return;
+    return false;
   }
 
-  const checkpoint = getCheckpoint.get(sourceId);
+  const checkpoint = getCheckpoint.get(sourceId, destinationId);
 
   let lastMessageId = checkpoint?.last_message_id ?? null;
   let processedCount = 0;
@@ -532,10 +565,10 @@ async function syncHistory(sourceId, destinationId) {
           console.error(
             `Stopping history sync at ${message.id}. It will be retried next time.`
           );
-          return;
+          return false;
         }
 
-        saveCheckpoint.run(sourceId, message.id);
+        saveCheckpoint.run(sourceId, destinationId, message.id);
 
         // Advance the recovery cursor.
         lastMessageId = message.id;
@@ -577,10 +610,10 @@ async function syncHistory(sourceId, destinationId) {
         console.error(
           `Stopping history sync at ${message.id}. It will be retried next time.`
         );
-        return;
+        return false;
       }
 
-      saveCheckpoint.run(sourceId, message.id);
+      saveCheckpoint.run(sourceId, destinationId, message.id);
       lastMessageId = message.id;
       processedCount++;
     }
@@ -589,11 +622,15 @@ async function syncHistory(sourceId, destinationId) {
   console.log(
     `Finished history sync for ${sourceId}. Processed ${processedCount} messages.`
   );
+
+  return true;
 }
 
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
   console.log(`Selected mode: ${config.mode}`);
+
+  const failedChannels = [];
 
   try {
     // Step 1: Copy historical messages if enabled.
@@ -606,10 +643,19 @@ client.once(Events.ClientReady, async (readyClient) => {
           `Migrating ${sourceId} -> ${destinationId}`
         );
 
-        await syncHistory(sourceId, destinationId);
+        const success = await syncHistory(sourceId, destinationId);
+
+        if (!success) failedChannels.push(sourceId);
       }
 
-      console.log("Historical migration completed.");
+      if (failedChannels.length) {
+        console.error(
+          `Historical migration incomplete for: ${failedChannels.join(", ")}. ` +
+          "Restart the bot to resume from the last checkpoint."
+        );
+      } else {
+        console.log("Historical migration completed.");
+      }
     } else {
       console.log("Historical migration is disabled.");
     }
@@ -630,7 +676,7 @@ client.once(Events.ClientReady, async (readyClient) => {
 
     db.close();
     client.destroy();
-    process.exitCode = 0;
+    process.exitCode = failedChannels.length ? 1 : 0;
   } catch (error) {
     console.error("Migration failed:", error);
     console.error(
