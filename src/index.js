@@ -400,6 +400,71 @@ async function updateCopiedMessage(message) {
   }
 }
 
+async function deleteCopiedMessages(message) {
+  if (!message?.id) return;
+
+  const copies = getCopies.all(message.id);
+
+  if (copies.length === 0) return;
+
+  const deleteKey = `${message.id}:delete`;
+
+  if (inProgress.has(deleteKey)) return;
+
+  inProgress.add(deleteKey);
+
+  try {
+    for (const copy of copies) {
+      try {
+        const destination = await client.channels.fetch(
+          copy.destination_channel_id
+        );
+
+        if (!destination || !destination.isTextBased()) {
+          console.error(
+            `Cannot access destination channel: ${copy.destination_channel_id}`
+          );
+          continue;
+        }
+
+        const destinationMessage = await destination.messages.fetch(
+          copy.destination_message_id
+        );
+
+        await destinationMessage.delete();
+
+        deleteCopied.run(
+          message.id,
+          copy.destination_channel_id
+        );
+
+        console.log(
+          `Deleted copy: ${message.id} -> ${copy.destination_message_id}`
+        );
+      } catch (error) {
+        // The destination message may already have been deleted.
+        if (error.code === 10008 || error.status === 404) {
+          deleteCopied.run(
+            message.id,
+            copy.destination_channel_id
+          );
+
+          console.log(
+            `Copy was already deleted: ${copy.destination_message_id}`
+          );
+        } else {
+          console.error(
+            `Failed to delete copy ${copy.destination_message_id}:`,
+            error
+          );
+        }
+      }
+    }
+  } finally {
+    inProgress.delete(deleteKey);
+  }
+}
+
 async function syncHistory(sourceId, destinationId) {
   const source = await client.channels.fetch(sourceId);
 
@@ -525,6 +590,36 @@ client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
   if (!config.channelMap[newMessage.channelId]) return;
 
   await updateCopiedMessage(newMessage);
+});
+
+client.on(Events.MessageDelete, async (message) => {
+  if (
+    config.mode !== "synchronization" ||
+    config.liveSync?.enabled !== true ||
+    config.liveSync?.syncDeletions !== true
+  ) {
+    return;
+  }
+
+  if (!config.channelMap[message.channelId]) return;
+
+  await deleteCopiedMessages(message);
+});
+
+client.on(Events.MessageBulkDelete, async (messages, channel) => {
+  if (
+    config.mode !== "synchronization" ||
+    config.liveSync?.enabled !== true ||
+    config.liveSync?.syncDeletions !== true
+  ) {
+    return;
+  }
+
+  if (!config.channelMap[channel.id]) return;
+
+  for (const message of messages.values()) {
+    await deleteCopiedMessages(message);
+  }
 });
 
 client.on(Events.Error, (error) => {
