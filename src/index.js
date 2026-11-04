@@ -130,38 +130,47 @@ function truncate(text, maxLength = 2000) {
   return text.slice(0, maxLength - 3) + "...";
 }
 
-function shouldCopyMessage(message) {
-  const filters = config.filters || {};
+function linksEnabled() {
+  return config.copyLinks !== false && config.filters?.links !== false;
+}
 
+// Shared by shouldCopyMessage() and buildMessagePayload() so the
+// decision to copy a message and what gets copied always agree.
+function isAttachmentAllowed(attachment) {
+  if (config.copyAttachments === false) return false;
+
+  const filters = config.filters || {};
+  const type = attachment.contentType || "";
+  const filename = attachment.name || "";
+
+  const isImage =
+    type.startsWith("image/") ||
+    /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(filename);
+
+  const isVideo =
+    type.startsWith("video/") ||
+    /\.(mp4|mov|webm|mkv|avi)$/i.test(filename);
+
+  if (isImage) return filters.images !== false;
+  if (isVideo) return filters.videos !== false;
+  return filters.otherFiles !== false;
+}
+
+function getEmbeddedLinks(message) {
+  return message.embeds
+    .map((embed) => embed.url)
+    .filter(Boolean);
+}
+
+function shouldCopyMessage(message) {
   const hasLink =
-    filters.links !== false &&
-    config.copyLinks !== false &&
-    /https?:\/\/\S+/i.test(message.content);
+    linksEnabled() &&
+    (/https?:\/\/\S+/i.test(message.content)
+      || getEmbeddedLinks(message).length > 0);
 
   const hasEligibleAttachment = [
     ...message.attachments.values()
-  ].some((attachment) => {
-    if (config.copyAttachments === false) return false;
-
-    const type = attachment.contentType || "";
-    const filename = attachment.name || "";
-
-    const isImage =
-      type.startsWith("image/") ||
-      /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(filename);
-
-    const isVideo =
-      type.startsWith("video/") ||
-      /\.(mp4|mov|webm|mkv|avi)$/i.test(filename);
-
-    const isOtherFile = !isImage && !isVideo;
-
-    return (
-      (isImage && filters.images !== false) ||
-      (isVideo && filters.videos !== false) ||
-      (isOtherFile && filters.otherFiles !== false)
-    );
-  });
+  ].some(isAttachmentAllowed);
 
   return hasLink || hasEligibleAttachment;
 }
@@ -170,10 +179,9 @@ async function buildMessagePayload(message) {
   let content = message.content || "";
 
   // Include URLs from embeds.
-  if (config.copyLinks !== false) {
-    const embeddedLinks = message.embeds
-      .map((embed) => embed.url)
-      .filter((url) => url && !content.includes(url));
+  if (linksEnabled()) {
+    const embeddedLinks = getEmbeddedLinks(message)
+      .filter((url) => !content.includes(url));
 
     if (embeddedLinks.length) {
       content += (content ? "\n" : "") + embeddedLinks.join("\n");
@@ -183,45 +191,43 @@ async function buildMessagePayload(message) {
   const files = [];
   const fallbackLinks = [];
 
-  if (config.copyAttachments !== false) {
-    for (const attachment of message.attachments.values()) {
-      if (attachment.size > maxAttachmentBytes) {
+  // Attachments excluded by copyAttachments or the type filters are
+  // dropped entirely, not posted as links.
+  for (const attachment of message.attachments.values()) {
+    if (!isAttachmentAllowed(attachment)) continue;
+
+    if (attachment.size > maxAttachmentBytes) {
+      fallbackLinks.push(attachment.url);
+      continue;
+    }
+
+    try {
+      const response = await fetch(attachment.url);
+
+      if (!response.ok) {
+        throw new Error(`Download returned ${response.status}`);
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+
+      if (buffer.length > maxAttachmentBytes) {
         fallbackLinks.push(attachment.url);
         continue;
       }
 
-      try {
-        const response = await fetch(attachment.url);
+      files.push({
+        attachment: buffer,
+        name: attachment.name || "attachment",
+      });
+    } catch (error) {
+      console.warn(
+        "Could not download attachment:",
+        attachment.url,
+        error.message
+      );
 
-        if (!response.ok) {
-          throw new Error(`Download returned ${response.status}`);
-        }
-
-        const buffer = Buffer.from(await response.arrayBuffer());
-
-        if (buffer.length > maxAttachmentBytes) {
-          fallbackLinks.push(attachment.url);
-          continue;
-        }
-
-        files.push({
-          attachment: buffer,
-          name: attachment.name || "attachment",
-        });
-      } catch (error) {
-        console.warn(
-          "Could not download attachment:",
-          attachment.url,
-          error.message
-        );
-
-        fallbackLinks.push(attachment.url);
-      }
+      fallbackLinks.push(attachment.url);
     }
-  } else {
-    fallbackLinks.push(
-      ...message.attachments.map((attachment) => attachment.url)
-    );
   }
 
   if (fallbackLinks.length) {
