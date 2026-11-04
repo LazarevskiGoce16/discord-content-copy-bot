@@ -59,7 +59,12 @@ db.exec(`
     destination_message_id TEXT NOT NULL,
     copied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (source_message_id, destination_channel_id)
-  )
+  );
+  CREATE TABLE IF NOT EXISTS sync_checkpoints (
+    source_channel_id TEXT PRIMARY KEY,
+    last_message_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 const isCopied = db.prepare(`
@@ -88,6 +93,25 @@ const deleteCopied = db.prepare(`
   DELETE FROM copied_messages
   WHERE source_message_id = ?
     AND destination_channel_id = ?
+`);
+
+const getCheckpoint = db.prepare(`
+  SELECT last_message_id
+  FROM sync_checkpoints
+  WHERE source_channel_id = ?
+`);
+
+const saveCheckpoint = db.prepare(`
+  INSERT INTO sync_checkpoints (
+    source_channel_id,
+    last_message_id,
+    updated_at
+  )
+  VALUES (?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(source_channel_id)
+  DO UPDATE SET
+    last_message_id = excluded.last_message_id,
+    updated_at = CURRENT_TIMESTAMP
 `);
 
 const inProgress = new Set();
@@ -217,16 +241,16 @@ async function buildMessagePayload(message) {
 }
 
 async function copyMessage(message, destinationId) {
-  if (!message || message.author?.bot) return;
-  if (!shouldCopyMessage(message)) return;
-  if (message.author?.id === client.user.id) return;
+  if (!message || message.author.bot || !shouldCopyMessage(message)) {
+    return true;
+  }
+  if (message.author?.id === client.user.id) return true;
 
   const copyKey = `${message.id}:${destinationId}`;
 
-  if (isCopied.get(message.id, destinationId) || inProgress.has(copyKey)) {
-    return;
-  }
+  if (isCopied.get(message.id, destinationId)) return true;
 
+  if (inProgress.has(copyKey)) return true;
   inProgress.add(copyKey);
 
   try {
@@ -235,7 +259,7 @@ async function copyMessage(message, destinationId) {
     if (!destination || !destination.isTextBased()
         || !destination.guild) {
       console.error("Invalid destination channel:", destinationId);
-      return;
+      return false;
     }
 
     const me = destination.guild.members.me;
@@ -251,12 +275,12 @@ async function copyMessage(message, destinationId) {
         "Missing destination permissions:",
         destinationId
       );
-      return;
+      return false;
     }
 
     const payload = await buildMessagePayload(message);
 
-    if (!payload) return;
+    if (!payload) return true;
 
     const sent = await destination.send(payload);
 
@@ -271,11 +295,14 @@ async function copyMessage(message, destinationId) {
       `Copied ${message.id} -> ${sent.id} | ` +
       `Original time: ${message.createdAt.toLocaleString()}`
     );
+
+    return true;
   } catch (error) {
     console.error(
       `Failed to copy message ${message.id}:`,
       error
     );
+    return false;
   } finally {
     inProgress.delete(copyKey);
   }
@@ -468,47 +495,100 @@ async function deleteCopiedMessages(message) {
 async function syncHistory(sourceId, destinationId) {
   const source = await client.channels.fetch(sourceId);
 
-  if (!source || !source.isTextBased() || !source.guild) {
-    console.error("Invalid source channel:", sourceId);
+  if (!source || !source.isTextBased() || !source.messages) {
+    console.error(`Invalid source channel: ${sourceId}`);
     return;
   }
 
-  console.log(`Reading history from ${sourceId}`);
+  const checkpoint = getCheckpoint.get(sourceId);
 
-  let before;
-  const pages = [];
+  let lastMessageId = checkpoint?.last_message_id ?? null;
+  let processedCount = 0;
 
-  // Fetch history in batches of up to 100 messages.
-  while (true) {
-    const options = { limit: 100 };
+  console.log(
+    checkpoint
+      ? `Recovering messages after ${lastMessageId} in ${sourceId}`
+      : `Starting initial history scan for ${sourceId}`
+  );
 
-    if (before) options.before = before;
+  if (lastMessageId) {
+    // Recover messages posted after the previous checkpoint.
+    while (true) {
+      const messages = await source.messages.fetch({
+        after: lastMessageId,
+        limit: 100,
+      });
 
-    const batch = await source.messages.fetch(options);
+      if (messages.size === 0) break;
 
-    if (batch.size === 0) break;
+      const orderedMessages = [...messages.values()].sort(
+        (a, b) => BigInt(a.id) < BigInt(b.id) ? -1 : 1
+      );
 
-    pages.push([...batch.values()]);
-    before = batch.last().id;
+      for (const message of orderedMessages) {
+        const success = await copyMessage(message, destinationId);
 
-    if (batch.size < 100) break;
-  }
+        if (success === false) {
+          console.error(
+            `Stopping history sync at ${message.id}. It will be retried next time.`
+          );
+          return;
+        }
 
-  // API results are newest-first. Reverse the pages and
-  // sort each page to transfer the history oldest-first.
-  pages.reverse();
+        saveCheckpoint.run(sourceId, message.id);
 
-  for (const page of pages) {
-    page.sort(
-      (a, b) => a.createdTimestamp - b.createdTimestamp
+        // Advance the recovery cursor.
+        lastMessageId = message.id;
+        processedCount++;
+      }
+    }
+  } else {
+    // No checkpoint exists: perform the initial full-history scan.
+    let before = null;
+    const allMessages = [];
+
+    while (true) {
+      const options = { limit: 100 };
+
+      if (before) {
+        options.before = before;
+      }
+
+      const messages = await source.messages.fetch(options);
+
+      if (messages.size === 0) break;
+
+      allMessages.push(...messages.values());
+
+      before = messages.last().id;
+
+      if (messages.size < 100) break;
+    }
+
+    // Process messages from oldest to newest.
+    allMessages.sort(
+      (a, b) => BigInt(a.id) < BigInt(b.id) ? -1 : 1
     );
 
-    for (const message of page) {
-      await copyMessage(message, destinationId);
+    for (const message of allMessages) {
+      const success = await copyMessage(message, destinationId);
+
+      if (success === false) {
+        console.error(
+          `Stopping history sync at ${message.id}. It will be retried next time.`
+        );
+        return;
+      }
+
+      saveCheckpoint.run(sourceId, message.id);
+      lastMessageId = message.id;
+      processedCount++;
     }
   }
 
-  console.log(`Finished history for ${sourceId}`);
+  console.log(
+    `Finished history sync for ${sourceId}. Processed ${processedCount} messages.`
+  );
 }
 
 client.once(Events.ClientReady, async (readyClient) => {
