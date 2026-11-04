@@ -1,103 +1,128 @@
 # Discord Content Copy Bot
 
-A one-way Discord server content migration tool built with **Node.js** and **discord.js**.
+A one-way Discord content copier built with **Node.js** and **discord.js**.
 
-`discord-content-copy-bot` copies selected historical messages from source channels into mapped destination channels. It is designed for one-time migrations—not continuous mirroring or synchronization.
+`discord-content-copy-bot` copies messages containing links and attachments (images, GIFs, videos and other files) from source channels into mapped destination channels. It runs in one of two modes:
 
-It can transfer messages containing links and selected attachments, including images, GIFs, videos, and other files.
+- **Migration:** copy each source channel's history once, then exit.
+- **Synchronization:** copy history, then stay online and mirror new messages and, optionally, edits and deletions.
 
 ## Features
 
-- **One-way migration:** Copy content from a source server/channel to a destination server/channel.
-- **Selected channel mapping:** Configure multiple source-to-destination channel pairs.
-- **Historical messages:** Fetch and process existing channel history.
-- **Content filtering:** Choose whether to include images, videos, other files, and links.
-- **Attachment transfer:** Download eligible attachments and upload them to the destination channel, subject to Discord's upload limits.
-- **Duplicate tracking:** Use SQLite to remember which source messages have been copied to each destination channel.
-- **Independent destinations:** The same source message can be copied to multiple destination channels, with separate tracking for each destination.
-- **Migration logging:** Log source and destination message IDs and the original message timestamp.
-- **One-time execution:** Shut down after the configured migration finishes.
+- **Channel mapping:** Configure multiple source-to-destination channel pairs.
+- **Historical copy:** Copy existing channel history oldest-first.
+- **Resumable:** A per-channel checkpoint lets an interrupted run continue where it stopped.
+- **Live synchronization:** Copy new messages as they are posted, and optionally propagate edits and deletions.
+- **Content filtering:** Choose whether to include images, videos, other files and links.
+- **Attachment transfer:** Download eligible attachments and re-upload them, falling back to the original URL when a file is too large or cannot be downloaded.
+- **Duplicate tracking:** SQLite records every copy, so re-running never re-sends a recorded message.
+- **Attribution:** Each copy shows the original author's username and the original timestamp.
 
 ## Requirements
 
-- [Node.js](https://nodejs.org/) (a current LTS release is recommended)
+- [Node.js](https://nodejs.org/) 22 or later (required by better-sqlite3)
 - npm
 - A Discord application and bot created in the [Discord Developer Portal](https://discord.com/developers/applications)
-- Permission to access the source channels and post in the destination channels
+- Authorization to read the source channels and to repost their content in the destination channels
 
 ## Installation
 
-Clone the repository:
+Clone the repository and install dependencies:
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/discord-content-copy-bot.git
 cd discord-content-copy-bot
-```
-
-Install dependencies:
-
-```bash
 npm install
 ```
 
-Create a `.env` file in the project root:
+Create your environment and configuration files from the examples:
+
+```bash
+cp .env.example .env
+cp config.example.json config.json
+```
+
+Put your bot token in `.env`:
 
 ```dotenv
 DISCORD_TOKEN=YOUR_BOT_TOKEN
 ```
 
-Create `config.json` in the project root. See [Configuration](#configuration) below.
-
-Start the migration:
+Edit `config.json` (see [Configuration](#configuration)), then start the bot:
 
 ```bash
 npm start
 ```
 
-The bot logs in, processes each configured channel mapping, and shuts down when the migration finishes.
-
 ## Discord bot setup
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications).
 2. Create a new application and add a bot.
-3. Open the **Bot** settings.
-4. Enable **Message Content Intent** under Privileged Gateway Intents.
-5. Generate an OAuth2 authorization URL with the `bot` scope.
-6. Invite the bot to both the source and destination servers.
+3. In the **Bot** settings, enable **Message Content Intent** under Privileged Gateway Intents. Without it, the bot cannot see links in message text.
+4. Generate an OAuth2 authorization URL with the `bot` scope and the permissions below.
+5. Invite the bot to both the source and destination servers.
 
-The bot needs these permissions:
+Required permissions:
 
 | Permission | Where | Purpose |
 |---|---|---|
 | View Channels | Source and destination | Access the configured channels |
 | Read Message History | Source | Fetch historical messages |
-| Send Messages | Destination | Post migrated messages |
+| Read Message History | Destination | Find earlier copies when syncing edits and deletions |
+| Send Messages | Destination | Post copied messages |
 | Attach Files | Destination | Upload copied attachments |
-| Embed Links | Destination | Display link previews where Discord permits them |
+| Embed Links | Destination | Show link previews |
 
-The bot must be able to access every configured source and destination channel. You must have authorization to access and repost the content being migrated.
+The bot only edits and deletes its own messages, so it does not need **Manage Messages**.
 
 ## Configuration
 
-Example `config.json`:
+Example `config.json` (the same as `config.example.json`):
 
 ```json
 {
+  "mode": "migration",
+
+  "history": {
+    "enabled": true
+  },
+
+  "liveSync": {
+    "enabled": false,
+    "syncEdits": false,
+    "syncDeletions": false
+  },
+
   "channelMap": {
     "SOURCE_CHANNEL_ID_1": "DESTINATION_CHANNEL_ID_1",
     "SOURCE_CHANNEL_ID_2": "DESTINATION_CHANNEL_ID_2"
   },
+
   "copyAttachments": true,
   "copyLinks": true,
+
   "filters": {
     "images": true,
     "videos": true,
     "otherFiles": true,
     "links": true
   },
-  "maxAttachmentSizeMB": 8
+
+  "maxAttachmentSizeMB": 10
 }
 ```
+
+### Mode and synchronization options
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `mode` | `"migration"` or `"synchronization"` | Required | Migration exits after copying history. Synchronization can stay online. |
+| `history.enabled` | Boolean | `true` | Copy existing channel history on startup. |
+| `liveSync.enabled` | Boolean | `false` | Copy new messages as they arrive. Only used in synchronization mode. |
+| `liveSync.syncEdits` | Boolean | `false` | Update copies when the source message is edited. |
+| `liveSync.syncDeletions` | Boolean | `false` | Delete copies when the source message is deleted. |
+
+Synchronization mode needs `history.enabled` or `liveSync.enabled` turned on; the bot refuses to start otherwise.
 
 ### Channel mapping
 
@@ -110,182 +135,161 @@ Each entry in `channelMap` maps one source channel ID to one destination channel
 }
 ```
 
-The bot processes each mapping independently. You can map multiple source channels to different destination channels, and you can map the same source channel to more than one destination channel.
+Several source channels can map to the same destination. A source channel can have only one destination, because each key in the map must be unique.
 
-To copy a channel ID in Discord:
-
-1. Enable **Developer Mode** in Discord's Advanced settings.
-2. Right-click the channel.
-3. Select **Copy Channel ID**.
+To copy a channel ID in Discord, enable **Developer Mode** in Discord's Advanced settings, right-click the channel and select **Copy Channel ID**.
 
 ### Content options
 
-| Setting | Type | Description |
-|---|---|---|
-| `copyAttachments` | Boolean | Enables or disables attachment downloading and uploading globally. |
-| `copyLinks` | Boolean | Enables or disables copying URLs found in message text. |
-| `filters.images` | Boolean | Includes image attachments, including common image formats such as GIF. |
-| `filters.videos` | Boolean | Includes video attachments. |
-| `filters.otherFiles` | Boolean | Includes attachments that are not classified as images or videos. |
-| `filters.links` | Boolean | Includes messages containing HTTP or HTTPS URLs. |
-| `maxAttachmentSizeMB` | Number | Maximum attachment size the bot attempts to download and upload, in MB. |
-
-Set an individual filter to `false` to exclude that content type. A message is eligible if it contains at least one enabled content type.
-
-`copyAttachments: false` disables all attachment transfers, regardless of the individual attachment filters. `copyLinks: false` disables link detection, regardless of `filters.links`.
-
-The attachment size setting is a bot-side limit, not a way to override Discord's upload limits. Attachments that exceed the configured limit, or that cannot be downloaded, may be represented by their original URLs if the current implementation supports that fallback.
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `copyAttachments` | Boolean | `true` | Master switch for attachments. When `false`, no attachments are copied, whatever the individual filters say. |
+| `copyLinks` | Boolean | `true` | Master switch for links. When `false`, links do not make a message eligible and embed URLs are not added. |
+| `filters.images` | Boolean | `true` | Include image attachments, including GIFs. |
+| `filters.videos` | Boolean | `true` | Include video attachments. |
+| `filters.otherFiles` | Boolean | `true` | Include attachments that are neither images nor videos. |
+| `filters.links` | Boolean | `true` | Include messages that contain HTTP or HTTPS URLs. |
+| `maxAttachmentSizeMB` | Number | `10` | Largest attachment the bot downloads and re-uploads. |
 
 ## What gets copied?
 
-The bot is intended to copy messages that contain at least one eligible link or attachment.
+A message is copied when it contains at least one enabled link or attachment type. Messages sent by bots, including this one, are never copied.
 
-| Source message | Expected result |
+| Source message | Result |
 |---|---|
 | Plain text only | Skipped |
-| Text containing an HTTP/HTTPS URL | Copied when link filtering is enabled |
-| Image attachment | Copied when image filtering is enabled |
-| GIF attachment | Treated as an image when detected as `image/*` or by its `.gif` filename |
-| Video attachment | Copied when video filtering is enabled |
-| PDF, ZIP, or other attachment | Copied when other-file filtering is enabled |
+| Text containing an HTTP/HTTPS URL | Copied when links are enabled |
+| Link preview (embed) with a URL | Copied when links are enabled; the embed URL is added to the text |
+| Image or GIF attachment | Copied when images are enabled |
+| Video attachment | Copied when videos are enabled |
+| PDF, ZIP or other attachment | Copied when other files are enabled |
 | Text with an eligible attachment | Copied, including its text |
-| Message with multiple eligible attachments | Eligible attachments are processed, subject to upload limits |
+| Mixed attachments, some filtered out | Copied with only the enabled attachments; filtered ones are left out entirely |
 
-Some externally hosted GIFs and media are shared as links or embeds rather than file attachments. Their transfer depends on link handling and the URL being present in the message content or supported embed data.
+Attachment types are detected from the content type, falling back to the file extension.
 
-## Migration behavior
+Each copy starts with the original author's username and the original UTC timestamp, and is cut to Discord's 2,000-character limit. Mentions in copied text are never pinged.
 
-This project performs a **one-time historical migration**:
+When an enabled attachment is larger than `maxAttachmentSizeMB` or cannot be downloaded, its original URL is added under **Original attachment links** instead. If Discord rejects a message outright (for example because its files together exceed the server's upload limit), the bot logs it, skips it and continues.
 
-1. The bot logs in to Discord.
-2. It processes each entry in `channelMap`.
-3. It fetches source-channel history in batches.
-4. It processes messages in chronological order.
-5. It skips messages that do not match the configured filters.
-6. It sends eligible content to the mapped destination channel.
-7. It records successful copies in SQLite.
-8. It shuts down after all configured mappings finish.
+## How it runs
 
-It does not continuously monitor channels for new messages after the migration completes.
+### History
 
-### Running the migration again
+For each entry in `channelMap`, the bot:
 
-Run:
+1. Fetches the source channel's history.
+2. Copies eligible messages to the destination, oldest first.
+3. Records each copy in SQLite and saves a checkpoint after every message.
 
-```bash
-npm start
-```
+The first run for a channel pair scans the full history. Later runs only fetch messages newer than the checkpoint, so restarting in synchronization mode also picks up messages posted while the bot was offline.
 
-The SQLite database is retained between runs. Messages already recorded for a particular destination are skipped, while messages not yet recorded can be retried.
+If a copy fails for a reason that might be temporary, such as a network error or missing permissions, the bot stops that channel at the failed message and moves on to the next mapping. It retries from that message on the next run.
 
-If you intentionally want to start completely fresh, stop the bot and delete `transfer.sqlite` from the project root before running it again. **This removes all migration records**, so previously copied messages may be copied again.
+### After history
 
-## Duplicate tracking with SQLite
+- **Migration mode:** the bot shuts down. It exits with code `0` when every channel completed, or `1` when any channel was left incomplete. Run `npm start` again to resume.
+- **Synchronization mode with `liveSync.enabled`:** the bot stays online and copies new messages from mapped channels as they arrive.
 
-The bot creates `transfer.sqlite` automatically when it runs. It stores the source message ID, destination channel ID, destination message ID, and copy timestamp.
+### Edits and deletions
 
-The intended uniqueness rule is:
+With `syncEdits` on, editing a source message updates every copy of it. If the edit removes everything eligible (for example, the only link is deleted), the copies are deleted.
 
-```sql
-PRIMARY KEY (source_message_id, destination_channel_id)
-```
+With `syncDeletions` on, deleting a source message, including through bulk deletion, deletes its copies.
 
-This means:
+Only changes that happen while the bot is online are synchronized. An edit that makes a previously skipped message eligible does not create a new copy.
 
-- A source message is copied at most once to a given destination channel according to the database.
-- The same source message can be copied to a different destination channel.
-- Re-running a migration does not normally duplicate successfully recorded messages.
+## Data stored in SQLite
 
-The database is local to the machine running the bot. Keep it if you want to preserve migration progress.
+The bot creates `transfer.sqlite` in the directory it runs from, with two tables:
+
+- `copied_messages`: source message ID, source and destination channel IDs, destination message ID and copy time. A source message is recorded at most once per destination channel. Edit and deletion sync uses this table to find copies.
+- `sync_checkpoints`: the last processed source message for each source and destination pair.
+
+Keep the database to preserve progress. To start completely fresh, stop the bot and delete `transfer.sqlite`. **This discards all records**, so everything will be copied again and old copies can no longer be edited or deleted by the bot.
+
+Changing a source channel's destination in `channelMap` starts a new history copy for the new pair; the old pair's records are kept.
 
 ## Project structure
 
 ```text
 discord-content-copy-bot/
 ├── src/
-│   └── index.js
-├── .env
-├── .gitignore
-├── config.json
+│   ├── index.js              # Entry point: checks the token, registers handlers, logs in
+│   ├── config.js             # Loads and validates config.json
+│   ├── client.js             # Discord client
+│   ├── db.js                 # SQLite schema and queries
+│   ├── handlers/             # One file per Discord event
+│   ├── services/
+│   │   ├── copy.js           # Copies one message to a destination
+│   │   ├── history.js        # Checkpointed history copy
+│   │   └── sync.js           # Edit and deletion propagation
+│   └── utils/
+│       ├── filters.js        # Link and attachment eligibility
+│       ├── payload.js        # Builds the message sent to the destination
+│       └── errors.js         # Discord error classification
+├── .env.example
+├── config.example.json
 ├── package.json
-├── package-lock.json
-└── transfer.sqlite       # Generated automatically; do not commit
+└── package-lock.json
 ```
+
+`.env`, `config.json` and `transfer.sqlite` are created locally and are ignored by git.
 
 ## Security
 
-Never commit your Discord bot token.
+Never commit your Discord bot token. The included `.gitignore` already excludes `.env`, `config.json`, `node_modules/` and the SQLite files.
 
-Recommended `.gitignore`:
+If a bot token is ever exposed, reset it in the Discord Developer Portal immediately and update your `.env` file.
 
-```gitignore
-node_modules/
-.env
-transfer.sqlite
-transfer.sqlite-shm
-transfer.sqlite-wal
-```
+## Limitations
 
-Channel IDs are identifiers, not authentication credentials. However, if you prefer not to disclose your server structure in a public repository, keep your real `config.json` private and commit a `config.example.json` containing placeholder IDs instead.
-
-If a bot token is ever exposed, reset it in the Discord Developer Portal immediately and update your local `.env` file.
-
-## Limitations and notes
-
-- **No exact Discord message recreation:** The destination message is sent by the bot. Discord does not let a bot impersonate the original author or assign the original message timestamp to a newly sent message.
-- **Attribution:** The implementation can include the original author's username and original timestamp as message text.
-- **Timestamp display:** An ISO 8601 timestamp is unambiguous and uses UTC. A Discord timestamp such as `<t:UNIX_TIMESTAMP:F>` can display in each viewer's local timezone.
-- **Edits and deletions:** The current one-time migration does not synchronize later source-message edits or deletions.
-- **Reactions and threads:** These are not automatically recreated by the basic implementation.
-- **Embeds:** Link previews may render differently in the destination. Embed content is not guaranteed to be reproduced exactly.
-- **Attachment limits:** Discord's upload limits apply. Large files may need to be skipped or left as source links.
-- **Rate limits:** Discord rate limits apply. Avoid adding aggressive parallel requests; process messages responsibly.
-- **Large histories:** Fetching all pages into memory before processing can use substantial memory on large channels. A paginated, checkpointed implementation is recommended for very large migrations.
-- **Partial failures:** SQLite records successful sends, but an interruption after Discord accepts a send and before the database record is saved can result in a duplicate on a later run.
+- **Not an exact recreation:** Copies are sent by the bot. Discord does not let a bot post as the original author or backdate a message, so authorship and time are shown as text.
+- **Reactions and threads** are not copied.
+- **Embeds:** Only embed URLs are copied; Discord regenerates the preview in the destination, which may look different.
+- **Offline changes:** Edits and deletions made while the bot is offline are not synchronized.
+- **Large histories:** The first scan of a channel loads its whole history into memory before copying. Later runs only fetch messages after the checkpoint.
+- **Rare duplicates:** If the bot stops after Discord accepts a message but before the copy is recorded, that message can be copied again on the next run.
+- **Rate limits:** Messages are copied one at a time, and discord.js waits out Discord's rate limits automatically.
 
 ## Troubleshooting
 
 ### `DISCORD_TOKEN is missing from .env`
 
-Make sure `.env` exists in the project root and contains:
+Make sure `.env` exists in the project root and contains `DISCORD_TOKEN=YOUR_BOT_TOKEN` with no spaces around the `=`.
 
-```dotenv
-DISCORD_TOKEN=YOUR_BOT_TOKEN
-```
+### `Invalid mode` or `channelMap must contain at least one channel mapping`
 
-Do not add spaces around the `=` or commit this file.
+Check that `mode` is `"migration"` or `"synchronization"` and that `channelMap` has at least one entry.
 
-### The bot cannot access a channel
+### `Invalid source channel` or `Invalid destination channel`
 
-Check that the bot is in the relevant server and has **View Channel** and **Read Message History** permissions in the source, or **View Channel** and **Send Messages** permissions in the destination.
+The channel ID is wrong, or the bot is not in that server or cannot see the channel. Check the IDs and the **View Channels** permission.
 
-### Message content or links are missing
+### `Missing destination permissions`
 
-Verify that **Message Content Intent** is enabled in the Developer Portal and that the bot has the necessary channel permissions. Check the `copyLinks` and `filters.links` settings.
+Give the bot **View Channels** and **Send Messages** in the destination channel, then restart. History resumes from the checkpoint.
+
+### `Historical migration incomplete for: …`
+
+At least one channel stopped at a message that could not be copied. The log line before it shows the error. Fix the cause and run the bot again; it resumes from that message.
+
+### Links are missing or link-only messages are skipped
+
+Verify that **Message Content Intent** is enabled in the Developer Portal, and check `copyLinks` and `filters.links`.
 
 ### Attachments are not copied
 
-Check `copyAttachments`, the relevant filter (`images`, `videos`, or `otherFiles`), `maxAttachmentSizeMB`, and the destination bot's **Attach Files** permission. Some attachments may not expose a usable content type; filename detection is only a fallback.
+Check `copyAttachments`, the relevant filter (`images`, `videos` or `otherFiles`), `maxAttachmentSizeMB` and the bot's **Attach Files** permission in the destination.
 
-### Messages are skipped on a later run
+### Edits or deletions are not synchronized
 
-This is expected for messages already recorded in `transfer.sqlite` for that destination. Delete the database only if you intentionally want to discard all migration history and start fresh.
-
-### The bot stops after migration
-
-This is expected. The application is designed to exit after its one-time migration completes.
+Check that `mode` is `"synchronization"`, `liveSync.enabled` is `true`, and `syncEdits` or `syncDeletions` is `true`. The bot also needs **Read Message History** in the destination channel.
 
 ## Development
 
-Install dependencies:
-
 ```bash
 npm install
-```
-
-Run the bot:
-
-```bash
 npm start
 ```
 
@@ -298,4 +302,4 @@ The project uses:
 
 ## License
 
-No license has been specified yet. Add a `LICENSE` file before presenting the repository as open source. If you intend others to use, modify, and redistribute the project, choose a license that matches those goals.
+No license has been specified yet. Add a `LICENSE` file before presenting the repository as open source.
