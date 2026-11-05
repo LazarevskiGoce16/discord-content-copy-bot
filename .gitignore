@@ -4,3 +4,7 @@ transfer.sqlite
 transfer.sqlite-shm
 transfer.sqlite-wal
 config.json
+config.test.json
+test.sqlite
+test.sqlite-shm
+test.sqlite-wal

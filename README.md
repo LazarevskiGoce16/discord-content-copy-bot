@@ -317,6 +317,8 @@ npm test
 
 `npm test` runs the suite in `tests/` with Node's built-in test runner. The tests use fake Discord channels, `tests/fixtures/config.json` and an in-memory database, so they need no token, never connect to Discord and never touch your `config.json` or `transfer.sqlite`.
 
+[tests/MANUAL.md](tests/MANUAL.md) is a checklist for what only a real Discord server can confirm, such as permissions, upload limits and live edits.
+
 The project uses:
 
 - [Node.js](https://nodejs.org/)
