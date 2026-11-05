@@ -1,4 +1,11 @@
-const config = require("../config.json");
+const path = require("path");
+
+// CONFIG_PATH lets tests (or a second deployment) use another file.
+const config = require(
+  process.env.CONFIG_PATH
+    ? path.resolve(process.env.CONFIG_PATH)
+    : "../config.json"
+);
 
 const validModes = ["migration", "synchronization"];
 

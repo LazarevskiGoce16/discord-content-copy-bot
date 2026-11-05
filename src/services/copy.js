@@ -64,6 +64,15 @@ async function sendCopy(message, destinationId) {
 
     if (!payload) return true;
 
+    if (payload.files.length
+        && !permissions.has(PermissionsBitField.Flags.AttachFiles)) {
+      console.error(
+        "Missing Attach Files permission in destination:",
+        destinationId
+      );
+      return false;
+    }
+
     const sent = await destination.send(payload);
 
     db.saveCopied(
@@ -96,4 +105,17 @@ async function sendCopy(message, destinationId) {
   }
 }
 
-module.exports = { copyMessage };
+// Resolves once any in-flight copies of the message have finished, so
+// edits and deletions see the copies they need to act on.
+async function waitForPendingCopies(messageId) {
+  const pending = [...pendingCopies]
+    .filter(([key]) => key.startsWith(`${messageId}:`))
+    .map(([, copy]) => copy);
+
+  await Promise.all(pending);
+}
+
+module.exports = {
+  copyMessage,
+  waitForPendingCopies,
+};

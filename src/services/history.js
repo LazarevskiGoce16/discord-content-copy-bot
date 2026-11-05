@@ -78,8 +78,18 @@ async function copyFullHistory(source, destinationId) {
   return copyInOrder(allMessages, source.id, destinationId);
 }
 
-// Returns true when the channel's history is fully copied.
+// Returns true when the channel's history is fully copied. Errors are
+// contained here so one broken channel does not stop the others.
 async function syncHistory(sourceId, destinationId) {
+  try {
+    return await syncChannelHistory(sourceId, destinationId);
+  } catch (error) {
+    console.error(`History sync failed for ${sourceId}:`, error);
+    return false;
+  }
+}
+
+async function syncChannelHistory(sourceId, destinationId) {
   const source = await client.channels.fetch(sourceId);
 
   if (!source || !source.isTextBased() || !source.messages) {

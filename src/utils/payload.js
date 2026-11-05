@@ -8,9 +8,46 @@ const {
 const maxAttachmentBytes =
   (config.maxAttachmentSizeMB ?? 10) * 1024 * 1024;
 
+const downloadAttempts = 3;
+const downloadTimeoutMs = 30_000;
+const retryDelayMs = 500;
+
 function truncate(text, maxLength = 2000) {
   if (text.length <= maxLength) return text;
   return text.slice(0, maxLength - 3) + "...";
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Retries network errors, timeouts, rate limits and server errors.
+// Other HTTP errors (e.g. 403/404 for an expired URL) fail immediately.
+async function download(url) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= downloadAttempts; attempt++) {
+    if (attempt > 1) await sleep(retryDelayMs * (attempt - 1));
+
+    let response;
+
+    try {
+      response = await fetch(url, {
+        signal: AbortSignal.timeout(downloadTimeoutMs),
+      });
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+
+    if (response.ok) {
+      return Buffer.from(await response.arrayBuffer());
+    }
+
+    lastError = new Error(`Download returned ${response.status}`);
+
+    if (response.status !== 429 && response.status < 500) break;
+  }
+
+  throw lastError;
 }
 
 async function buildMessagePayload(message) {
@@ -40,13 +77,7 @@ async function buildMessagePayload(message) {
     }
 
     try {
-      const response = await fetch(attachment.url);
-
-      if (!response.ok) {
-        throw new Error(`Download returned ${response.status}`);
-      }
-
-      const buffer = Buffer.from(await response.arrayBuffer());
+      const buffer = await download(attachment.url);
 
       if (buffer.length > maxAttachmentBytes) {
         fallbackLinks.push(attachment.url);

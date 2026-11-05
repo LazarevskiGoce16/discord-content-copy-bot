@@ -1,22 +1,33 @@
 const client = require("../client");
 const db = require("../db");
+const { historyEnabled, getDestinationId } = require("../config");
 const { shouldCopyMessage } = require("../utils/filters");
 const { buildMessagePayload } = require("../utils/payload");
 const { isUnknownMessageError } = require("../utils/errors");
+const { copyMessage, waitForPendingCopies } = require("./copy");
 
-// Keys of edits/deletions currently being propagated.
-const inProgress = new Set();
+// Per-message task chains. Edits and deletions of the same message run
+// one after another, so a rapid second edit is applied rather than lost.
+const queues = new Map();
 
-async function withLock(key, task) {
-  if (inProgress.has(key)) return;
+function enqueue(messageId, task) {
+  const run = (queues.get(messageId) ?? Promise.resolve())
+    .then(async () => {
+      // Act on copies that are still being sent, too.
+      await waitForPendingCopies(messageId);
+      await task();
+    })
+    .catch((error) => {
+      console.error(`Sync task for message ${messageId} failed:`, error);
+    });
 
-  inProgress.add(key);
+  queues.set(messageId, run);
 
-  try {
-    await task();
-  } finally {
-    inProgress.delete(key);
-  }
+  run.finally(() => {
+    if (queues.get(messageId) === run) queues.delete(messageId);
+  });
+
+  return run;
 }
 
 // Deletes one destination copy and forgets it. Returns true only when
@@ -60,6 +71,13 @@ async function removeCopy(sourceMessageId, copy) {
   }
 }
 
+// Messages history sync would have covered, or that were posted while
+// the bot was online, may get a copy when an edit makes them eligible.
+function isInLiveScope(message) {
+  return historyEnabled()
+    || message.createdTimestamp >= client.readyTimestamp;
+}
+
 async function updateCopiedMessage(message) {
   if (!message) return;
 
@@ -75,14 +93,28 @@ async function updateCopiedMessage(message) {
 
   if (!message.author || message.author.bot) return;
 
-  const copies = db.getCopies(message.id);
+  // Discord also sends updates when it adds link previews. Only real
+  // edits set editedTimestamp; skip the rest to avoid needless re-uploads.
+  if (!message.editedTimestamp) return;
 
-  if (copies.length === 0) return;
+  await enqueue(message.id, async () => {
+    const copies = db.getCopies(message.id);
+    const eligible = shouldCopyMessage(message);
 
-  await withLock(`${message.id}:update`, async () => {
+    if (copies.length === 0) {
+      const destinationId = getDestinationId(message.channelId);
+
+      // The edit made a previously skipped message eligible.
+      if (eligible && destinationId && isInLiveScope(message)) {
+        await copyMessage(message, destinationId);
+      }
+
+      return;
+    }
+
     // If the edit makes the message ineligible,
     // remove its existing destination copies.
-    if (!shouldCopyMessage(message)) {
+    if (!eligible) {
       for (const copy of copies) {
         if (await removeCopy(message.id, copy)) {
           console.log(
@@ -129,6 +161,15 @@ async function updateCopiedMessage(message) {
           `Updated ${message.id} -> ${copy.destination_message_id}`
         );
       } catch (error) {
+        if (isUnknownMessageError(error)) {
+          // Someone deleted the copy by hand; forget it.
+          db.deleteCopied(message.id, copy.destination_channel_id);
+          console.log(
+            `Copy ${copy.destination_message_id} no longer exists; forgot it.`
+          );
+          continue;
+        }
+
         console.error(
           `Could not update destination copy ${copy.destination_message_id}:`,
           error
@@ -141,12 +182,8 @@ async function updateCopiedMessage(message) {
 async function deleteCopiedMessages(message) {
   if (!message?.id) return;
 
-  const copies = db.getCopies(message.id);
-
-  if (copies.length === 0) return;
-
-  await withLock(`${message.id}:delete`, async () => {
-    for (const copy of copies) {
+  await enqueue(message.id, async () => {
+    for (const copy of db.getCopies(message.id)) {
       if (await removeCopy(message.id, copy)) {
         console.log(
           `Deleted copy: ${message.id} -> ${copy.destination_message_id}`

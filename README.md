@@ -70,7 +70,7 @@ Required permissions:
 | Read Message History | Source | Fetch historical messages |
 | Read Message History | Destination | Find earlier copies when syncing edits and deletions |
 | Send Messages | Destination | Post copied messages |
-| Attach Files | Destination | Upload copied attachments |
+| Attach Files | Destination | Upload copied attachments (checked before sending a message with files) |
 | Embed Links | Destination | Show link previews |
 
 The bot only edits and deletes its own messages, so it does not need **Manage Messages**.
@@ -124,6 +124,16 @@ Example `config.json` (the same as `config.example.json`):
 
 Synchronization mode needs `history.enabled` or `liveSync.enabled` turned on; the bot refuses to start otherwise.
 
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `DISCORD_TOKEN` | Yes | The bot token, read from `.env`. |
+| `CONFIG_PATH` | No | Use a config file other than `config.json`, relative to the current directory. |
+| `DATABASE_PATH` | No | Use a database file other than `transfer.sqlite`. The tests use `:memory:`. |
+
+With `CONFIG_PATH` and `DATABASE_PATH`, one checkout can run several independent setups.
+
 ### Channel mapping
 
 Each entry in `channelMap` maps one source channel ID to one destination channel ID:
@@ -170,7 +180,7 @@ Attachment types are detected from the content type, falling back to the file ex
 
 Each copy starts with the original author's username and the original UTC timestamp, and is cut to Discord's 2,000-character limit. Mentions in copied text are never pinged.
 
-When an enabled attachment is larger than `maxAttachmentSizeMB` or cannot be downloaded, its original URL is added under **Original attachment links** instead. If Discord rejects a message outright (for example because its files together exceed the server's upload limit), the bot logs it, skips it and continues.
+Attachment downloads time out after 30 seconds and are retried up to three times on network errors, rate limits and server errors. When an enabled attachment is larger than `maxAttachmentSizeMB` or still cannot be downloaded, its original URL is added under **Original attachment links** instead. If Discord rejects a message outright (for example because its files together exceed the server's upload limit), the bot logs it, skips it and continues.
 
 ## How it runs
 
@@ -184,7 +194,7 @@ For each entry in `channelMap`, the bot:
 
 The first run for a channel pair scans the full history. Later runs only fetch messages newer than the checkpoint, so restarting in synchronization mode also picks up messages posted while the bot was offline.
 
-If a copy fails for a reason that might be temporary, such as a network error or missing permissions, the bot stops that channel at the failed message and moves on to the next mapping. It retries from that message on the next run.
+If a copy fails for a reason that might be temporary, such as a network error or missing permissions, the bot stops that channel at the failed message and moves on to the next mapping. It retries from that message on the next run. The same applies when a source channel cannot be read at all: that mapping is reported as incomplete and the others still run.
 
 ### After history
 
@@ -193,11 +203,17 @@ If a copy fails for a reason that might be temporary, such as a network error or
 
 ### Edits and deletions
 
-With `syncEdits` on, editing a source message updates every copy of it. If the edit removes everything eligible (for example, the only link is deleted), the copies are deleted.
+With `syncEdits` on:
 
-With `syncDeletions` on, deleting a source message, including through bulk deletion, deletes its copies.
+- Editing a source message updates every copy of it.
+- If the edit removes everything eligible (for example, the only link is deleted), the copies are deleted.
+- If the edit makes a skipped message eligible (for example, a link is added), a copy is created. With `history.enabled: false`, this only applies to messages posted while the bot was online. The new copy is posted at the end of the destination channel, not at the original message's position.
+- Link previews that Discord adds after a message is posted are not treated as edits, so copies are not re-uploaded for them.
+- If a copy was deleted by hand in the destination, the bot forgets it instead of retrying.
 
-Only changes that happen while the bot is online are synchronized. An edit that makes a previously skipped message eligible does not create a new copy.
+With `syncDeletions` on, deleting a source message, including through bulk deletion, deletes its copies. A message deleted while its copy is still being sent has that copy removed as soon as the send finishes.
+
+Edits and deletions of the same message are applied in the order they arrive. Only changes that happen while the bot is online are synchronized.
 
 ## Data stored in SQLite
 
@@ -228,6 +244,7 @@ discord-content-copy-bot/
 │       ├── filters.js        # Link and attachment eligibility
 │       ├── payload.js        # Builds the message sent to the destination
 │       └── errors.js         # Discord error classification
+├── tests/                    # node:test suite with fake Discord channels
 ├── .env.example
 ├── config.example.json
 ├── package.json
@@ -266,9 +283,13 @@ Check that `mode` is `"migration"` or `"synchronization"` and that `channelMap` 
 
 The channel ID is wrong, or the bot is not in that server or cannot see the channel. Check the IDs and the **View Channels** permission.
 
-### `Missing destination permissions`
+### `History sync failed for …`
 
-Give the bot **View Channels** and **Send Messages** in the destination channel, then restart. History resumes from the checkpoint.
+The source channel could not be read, usually because the ID is wrong or the bot lacks **View Channels** or **Read Message History** there. The error that follows gives the details. Other mappings still run.
+
+### `Missing destination permissions` or `Missing Attach Files permission in destination`
+
+Give the bot **View Channels** and **Send Messages** in the destination channel, plus **Attach Files** if messages have attachments, then restart. History resumes from the checkpoint.
 
 ### `Historical migration incomplete for: …`
 
@@ -291,7 +312,10 @@ Check that `mode` is `"synchronization"`, `liveSync.enabled` is `true`, and `syn
 ```bash
 npm install
 npm start
+npm test
 ```
+
+`npm test` runs the suite in `tests/` with Node's built-in test runner. The tests use fake Discord channels, `tests/fixtures/config.json` and an in-memory database, so they need no token, never connect to Discord and never touch your `config.json` or `transfer.sqlite`.
 
 The project uses:
 

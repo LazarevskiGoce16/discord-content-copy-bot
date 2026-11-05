@@ -1,6 +1,7 @@
 const Database = require("better-sqlite3");
 
-const db = new Database("transfer.sqlite");
+// DATABASE_PATH lets tests use ":memory:" instead of the real database.
+const db = new Database(process.env.DATABASE_PATH ?? "transfer.sqlite");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS copied_messages (
