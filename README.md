@@ -266,8 +266,17 @@ If a bot token is ever exposed, reset it in the Discord Developer Portal immedia
 - **Embeds:** Only embed URLs are copied; Discord regenerates the preview in the destination, which may look different.
 - **Offline changes:** Edits and deletions made while the bot is offline are not synchronized.
 - **Large histories:** The first scan of a channel loads its whole history into memory before copying. Later runs only fetch messages after the checkpoint.
+- **Long messages:** The attribution line adds about 80 characters, so a source message near Discord's 2,000-character limit is cut off at the end in its copy. A link at the very end can be lost.
+- **Restart rescans:** Live sync does not move the history checkpoint, so each restart re-fetches everything posted since the last history run. Already-copied messages are skipped, so this is only slower, not incorrect.
 - **Rare duplicates:** If the bot stops after Discord accepts a message but before the copy is recorded, that message can be copied again on the next run.
 - **Rate limits:** Messages are copied one at a time, and discord.js waits out Discord's rate limits automatically.
+
+## Future improvements
+
+Ideas for a later version, found during testing:
+
+- **Split long messages instead of cutting them.** When the attribution line pushes a copy over 2,000 characters, send the remainder as a second message rather than truncating it. Edit and deletion sync would then need to track both destination messages for one source message.
+- **Save the checkpoint during live sync.** Advance the history checkpoint as live messages are copied, so a restart only fetches messages posted while the bot was offline. The checkpoint must only move past a message once every earlier message is copied; otherwise a failed live copy would be skipped on restart.
 
 ## Troubleshooting
 
