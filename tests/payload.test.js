@@ -70,6 +70,20 @@ test("embed URLs are appended once, and only when links are on", async () => {
   assert.ok(!withoutLinks.content.includes("embed.test"));
 });
 
+test("embed URLs that Discord normalized are not duplicated", async () => {
+  // Discord stores "https://google.mk" as "https://google.mk/" in embeds.
+  const payload = await buildMessagePayload(makeMessage({
+    content: "https://google.mk\nhttps://github.com",
+    embeds: [
+      { url: "https://google.mk/" },
+      { url: "https://github.com/" },
+      { url: "https://other.test/" },
+    ],
+  }));
+
+  assert.match(payload.content, /https:\/\/google\.mk\nhttps:\/\/github\.com\nhttps:\/\/other\.test\/$/);
+});
+
 test("oversized attachment falls back to its URL", async () => {
   const big = { ...attachment("big.mp4", "video/mp4"), size: 50 * 1024 * 1024 };
   const payload = await buildMessagePayload(makeMessage({ attachments: [big] }));

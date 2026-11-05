@@ -96,12 +96,27 @@ test("without history, old messages are not copied on edit", async () => {
   client.readyTimestamp = null;
 });
 
-test("editing a copy deleted by hand forgets it", async () => {
+test("a copy deleted by hand stays deleted", async () => {
   const message = await copied();
   destination.messages.store.clear();
 
   await updateCopiedMessage(edited(message, "https://y.test"));
   assert.deepEqual(db.getCopies(message.id), []);
+
+  // Neither a later edit nor a history rescan re-creates it.
+  await updateCopiedMessage(edited(message, "https://z.test"));
+  assert.equal(await copyMessage(message, "destination"), true);
+  assert.equal(destination.messages.store.size, 0);
+});
+
+test("a copy removed for ineligibility comes back when eligible again", async () => {
+  const message = await copied();
+
+  await updateCopiedMessage(edited(message, "no link"));
+  assert.equal(destination.messages.store.size, 0);
+
+  await updateCopiedMessage(edited(message, "link again https://x.test"));
+  assert.equal(destination.messages.store.size, 1);
 });
 
 test("deleting the source deletes the copy", async () => {

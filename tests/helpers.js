@@ -110,20 +110,33 @@ function makeDestination({
 }
 
 // A source channel that pages like Discord: newest-first, and with
-// `after` returns the oldest `limit` messages after that ID.
-function makeSource(messages) {
+// `after` returns the oldest `limit` messages after that ID. Like Discord,
+// it returns no messages (not an error) without Read Message History.
+function makeSource(messages, {
+  permissions = ["ViewChannel", "ReadMessageHistory"],
+} = {}) {
+  const granted = permissions.map((name) => PermissionsBitField.Flags[name]);
+  const canReadHistory = granted.includes(
+    PermissionsBitField.Flags.ReadMessageHistory
+  );
   const sorted = [...messages].sort(
     (a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1)
   );
 
   return {
     id: "source",
+    guild: { members: { me: {} } },
     isTextBased: () => true,
+    permissionsFor: () => ({
+      has: (flags) => [flags].flat().every((flag) => granted.includes(flag)),
+    }),
     messages: {
       async fetch({ before, after, limit }) {
         let page;
 
-        if (after) {
+        if (!canReadHistory) {
+          page = [];
+        } else if (after) {
           page = sorted
             .filter((m) => BigInt(m.id) > BigInt(after))
             .slice(0, limit);

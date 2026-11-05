@@ -50,13 +50,30 @@ async function download(url) {
   throw lastError;
 }
 
+// Discord normalizes embed URLs (e.g. "https://a.com" becomes
+// "https://a.com/"), so URLs are compared in their parsed form.
+function normalizeUrl(url) {
+  try {
+    return new URL(url).href;
+  } catch {
+    return url;
+  }
+}
+
+function getContentUrls(content) {
+  return new Set(
+    (content.match(/https?:\/\/[^\s<>]+/gi) ?? []).map(normalizeUrl)
+  );
+}
+
 async function buildMessagePayload(message) {
   let content = message.content || "";
 
-  // Include URLs from embeds.
+  // Include URLs from embeds that are not already in the text.
   if (linksEnabled()) {
-    const embeddedLinks = getEmbeddedLinks(message)
-      .filter((url) => !content.includes(url));
+    const contentUrls = getContentUrls(content);
+    const embeddedLinks = [...new Set(getEmbeddedLinks(message))]
+      .filter((url) => !contentUrls.has(normalizeUrl(url)));
 
     if (embeddedLinks.length) {
       content += (content ? "\n" : "") + embeddedLinks.join("\n");

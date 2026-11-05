@@ -58,7 +58,7 @@ npm start
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications).
 2. Create a new application and add a bot.
-3. In the **Bot** settings, enable **Message Content Intent** under Privileged Gateway Intents. Without it, the bot cannot see links in message text.
+3. In the **Bot** settings, enable **Message Content Intent** under Privileged Gateway Intents. Discord refuses the bot's login without it.
 4. Generate an OAuth2 authorization URL with the `bot` scope and the permissions below.
 5. Invite the bot to both the source and destination servers.
 
@@ -209,7 +209,7 @@ With `syncEdits` on:
 - If the edit removes everything eligible (for example, the only link is deleted), the copies are deleted.
 - If the edit makes a skipped message eligible (for example, a link is added), a copy is created. With `history.enabled: false`, this only applies to messages posted while the bot was online. The new copy is posted at the end of the destination channel, not at the original message's position.
 - Link previews that Discord adds after a message is posted are not treated as edits, so copies are not re-uploaded for them.
-- If a copy was deleted by hand in the destination, the bot forgets it instead of retrying.
+- If a copy was deleted by hand in the destination, it stays deleted: later edits leave it alone, and restarts do not re-copy the message. The bot notices the deletion on the next edit of the source message.
 
 With `syncDeletions` on, deleting a source message, including through bulk deletion, deletes its copies. A message deleted while its copy is still being sent has that copy removed as soon as the send finishes.
 
@@ -219,7 +219,7 @@ Edits and deletions of the same message are applied in the order they arrive. On
 
 The bot creates `transfer.sqlite` in the directory it runs from, with two tables:
 
-- `copied_messages`: source message ID, source and destination channel IDs, destination message ID and copy time. A source message is recorded at most once per destination channel. Edit and deletion sync uses this table to find copies.
+- `copied_messages`: source message ID, source and destination channel IDs, destination message ID and copy time. A source message is recorded at most once per destination channel. Edit and deletion sync uses this table to find copies. Copies deleted by hand are kept with a `removed` flag so they are not re-created; databases from older versions get this column added automatically.
 - `sync_checkpoints`: the last processed source message for each source and destination pair.
 
 Keep the database to preserve progress. To start completely fresh, stop the bot and delete `transfer.sqlite`. **This discards all records**, so everything will be copied again and old copies can no longer be edited or deleted by the bot.
@@ -275,6 +275,14 @@ If a bot token is ever exposed, reset it in the Discord Developer Portal immedia
 
 Make sure `.env` exists in the project root and contains `DISCORD_TOKEN=YOUR_BOT_TOKEN` with no spaces around the `=`.
 
+### `Could not log in to Discord: Used disallowed intents`
+
+**Message Content Intent** is turned off. Enable it on the bot's **Bot** page in the Developer Portal; Discord refuses the login without it.
+
+### `Could not log in to Discord: An invalid token was provided.`
+
+`DISCORD_TOKEN` in `.env` is wrong or was reset. Copy a fresh token from the bot's **Bot** page.
+
 ### `Invalid mode` or `channelMap must contain at least one channel mapping`
 
 Check that `mode` is `"migration"` or `"synchronization"` and that `channelMap` has at least one entry.
@@ -283,9 +291,13 @@ Check that `mode` is `"migration"` or `"synchronization"` and that `channelMap` 
 
 The channel ID is wrong, or the bot is not in that server or cannot see the channel. Check the IDs and the **View Channels** permission.
 
+### `Missing View Channels or Read Message History in source`
+
+Give the bot both permissions in that source channel. The bot checks for them up front, because without Read Message History Discord returns no messages rather than an error, which would make the channel look empty. Other mappings still run.
+
 ### `History sync failed for …`
 
-The source channel could not be read, usually because the ID is wrong or the bot lacks **View Channels** or **Read Message History** there. The error that follows gives the details. Other mappings still run.
+The source channel could not be read, usually because the ID is wrong or the bot is not in that server. The error that follows gives the details. Other mappings still run.
 
 ### `Missing destination permissions` or `Missing Attach Files permission in destination`
 
@@ -297,7 +309,7 @@ At least one channel stopped at a message that could not be copied. The log line
 
 ### Links are missing or link-only messages are skipped
 
-Verify that **Message Content Intent** is enabled in the Developer Portal, and check `copyLinks` and `filters.links`.
+Check `copyLinks` and `filters.links`.
 
 ### Attachments are not copied
 

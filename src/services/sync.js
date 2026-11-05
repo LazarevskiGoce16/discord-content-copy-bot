@@ -162,10 +162,12 @@ async function updateCopiedMessage(message) {
         );
       } catch (error) {
         if (isUnknownMessageError(error)) {
-          // Someone deleted the copy by hand; forget it.
-          db.deleteCopied(message.id, copy.destination_channel_id);
+          // Someone deleted the copy by hand. Keep it deleted: don't
+          // update it again, and don't let history sync re-copy it.
+          db.markRemoved(message.id, copy.destination_channel_id);
           console.log(
-            `Copy ${copy.destination_message_id} no longer exists; forgot it.`
+            `Copy ${copy.destination_message_id} was deleted by hand; ` +
+            "it will not be re-created."
           );
           continue;
         }

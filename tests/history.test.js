@@ -69,6 +69,17 @@ test("skipped messages still advance the checkpoint", async () => {
   assert.equal(destination.messages.store.size, 1);
 });
 
+test("missing Read Message History fails instead of looking empty", async () => {
+  const destination = makeDestination();
+  useChannels({
+    source: makeSource(history, { permissions: ["ViewChannel"] }),
+    "pair-e": destination,
+  });
+
+  assert.equal(await syncHistory("source", "pair-e"), false);
+  assert.equal(db.getCheckpoint("source", "pair-e"), null);
+});
+
 test("an inaccessible source channel fails without throwing", async () => {
   useChannels({ destination: makeDestination() });
   assert.equal(await syncHistory("missing", "destination"), false);

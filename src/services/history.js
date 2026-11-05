@@ -1,3 +1,5 @@
+const { PermissionsBitField } = require("discord.js");
+
 const client = require("../client");
 const db = require("../db");
 const { copyMessage } = require("./copy");
@@ -94,6 +96,20 @@ async function syncChannelHistory(sourceId, destinationId) {
 
   if (!source || !source.isTextBased() || !source.messages) {
     console.error(`Invalid source channel: ${sourceId}`);
+    return false;
+  }
+
+  // Without Read Message History, Discord returns no messages instead of
+  // an error, which would look like an empty channel.
+  const me = source.guild?.members.me;
+
+  if (me && !source.permissionsFor(me)?.has([
+    PermissionsBitField.Flags.ViewChannel,
+    PermissionsBitField.Flags.ReadMessageHistory,
+  ])) {
+    console.error(
+      `Missing View Channels or Read Message History in source: ${sourceId}`
+    );
     return false;
   }
 

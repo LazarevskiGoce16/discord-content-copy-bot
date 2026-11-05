@@ -10,6 +10,7 @@ db.exec(`
     destination_channel_id TEXT NOT NULL,
     destination_message_id TEXT NOT NULL,
     copied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    removed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (source_message_id, destination_channel_id)
   );
   CREATE TABLE IF NOT EXISTS sync_checkpoints (
@@ -21,6 +22,19 @@ db.exec(`
   );
 `);
 
+// Databases created before the `removed` column existed get it added.
+const hasRemovedColumn = db.prepare("PRAGMA table_info(copied_messages)")
+  .all()
+  .some((column) => column.name === "removed");
+
+if (!hasRemovedColumn) {
+  db.exec(`
+    ALTER TABLE copied_messages
+    ADD COLUMN removed INTEGER NOT NULL DEFAULT 0
+  `);
+}
+
+// Includes removed copies, so they are never sent again.
 const isCopiedStmt = db.prepare(`
   SELECT 1 FROM copied_messages
   WHERE source_message_id = ?
@@ -41,6 +55,14 @@ const getCopiesStmt = db.prepare(`
   SELECT destination_channel_id, destination_message_id
   FROM copied_messages
   WHERE source_message_id = ?
+    AND removed = 0
+`);
+
+const markRemovedStmt = db.prepare(`
+  UPDATE copied_messages
+  SET removed = 1
+  WHERE source_message_id = ?
+    AND destination_channel_id = ?
 `);
 
 const deleteCopiedStmt = db.prepare(`
@@ -91,6 +113,12 @@ module.exports = {
 
   deleteCopied(sourceMessageId, destinationChannelId) {
     deleteCopiedStmt.run(sourceMessageId, destinationChannelId);
+  },
+
+  // For copies deleted by hand: keeps the record so the message is not
+  // copied again, but stops edits and deletions from acting on it.
+  markRemoved(sourceMessageId, destinationChannelId) {
+    markRemovedStmt.run(sourceMessageId, destinationChannelId);
   },
 
   getCheckpoint(sourceChannelId, destinationChannelId) {

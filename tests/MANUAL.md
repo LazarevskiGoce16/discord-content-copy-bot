@@ -49,11 +49,11 @@ Restore the valid config. Change one permission at a time on the channel, run, t
 
 | # | Change | Expected |
 |---|---|---|
-| 2.1 | Deny **Read Message History** on `src-a` | `History sync failed for <src-a>`; `src-b` still runs |
+| 2.1 | Deny **Read Message History** on `src-a` | `Missing View Channels or Read Message History in source: <src-a>`; `src-b` still runs; exit code `1` |
 | 2.2 | Deny **Send Messages** on `dst-a` | `Missing destination permissions`; `src-a` stops at the first eligible message |
 | 2.3 | Deny **Attach Files** on `dst-a` | Link-only messages copy; stops with `Missing Attach Files permission in destination` at the first message with a file |
 | 2.4 | Restore the permission and run again | Resumes from the message that failed |
-| 2.5 | Disable **Message Content Intent** in the Developer Portal, fresh state, run | Link-only messages are not copied (the bot cannot see their text). Re-enable it afterwards |
+| 2.5 | Disable **Message Content Intent** in the Developer Portal, run | Login refused: `Could not log in to Discord: Used disallowed intents` plus a hint to enable the intent; exit code `1`. Re-enable it afterwards |
 
 ## 3. Content and attachments
 
@@ -64,9 +64,9 @@ Check these in `dst-a` after a full run.
 | 3.1 | Any copied message | Starts with `**<username> (copied)**` and the original UTC date |
 | 3.2 | Image, GIF, video, PDF | Re-uploaded as files, not links |
 | 3.3 | File larger than `maxAttachmentSizeMB` | Posted under **Original attachment links** |
-| 3.4 | Several files that together exceed the server upload limit (10 MB on unboosted servers) but are each under `maxAttachmentSizeMB` | `Skipping message …; Discord rejected it permanently`; history continues past it |
+| 3.4 | Several files that together exceed the destination's upload limit but are each under `maxAttachmentSizeMB` | `Skipping message …; Discord rejected it permanently`; history continues past it. Needs a source server with a higher upload limit (boosted) than the destination; on equal servers Discord stops the user from posting such a message, and `npm test` covers it |
 | 3.5 | Message mentioning `@everyone` or a user | Mention text copied, nobody pinged |
-| 3.6 | Message over ~1,900 characters with a link | Copy cut to 2,000 characters ending in `...` |
+| 3.6 | Message of 1,950+ characters with a link (the attribution adds about 80) | Copy cut to 2,000 characters ending in `...`. Discord turns very long pastes into `message.txt`, which is copied as a file instead |
 | 3.7 | Set `filters.videos: false`, fresh state, run | Video-only messages skipped; a message with an image and a video copies only the image |
 
 ## 4. Synchronization mode
@@ -84,7 +84,7 @@ Config: `"mode": "synchronization"`, `history.enabled: true`, all `liveSync` opt
 | 4.7 | Post plain text, then edit it to add a link | Copy created at the end of `dst-a` |
 | 4.8 | Delete a source message | Copy deleted |
 | 4.9 | Bulk-delete several source messages (for example with a moderation bot's purge command) | All their copies deleted |
-| 4.10 | Delete a copy by hand in `dst-a`, then edit its source | Log `no longer exists; forgot it.`; no error spam on later edits |
+| 4.10 | Delete a copy by hand in `dst-a`, edit its source, edit it again, then restart the bot | Log `was deleted by hand; it will not be re-created.` once; the second edit and the restart do not re-create the copy |
 | 4.11 | Post an image with a message | File re-uploaded in the copy |
 | 4.12 | Stop the bot, post 2 links in `src-a`, start it again | Both copied during startup catch-up |
 | 4.13 | Stop the bot, edit or delete a copied source message, start it again | Not synchronized (documented limitation) |
